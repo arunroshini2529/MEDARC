@@ -1,18 +1,8 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "server.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    { "src": "/health", "dest": "server.js" },
-    { "src": "/api/(.*)", "dest": "server.js" },
-    { "src": "/index.html", "dest": "server.js" },
-    { "src": "/manifest.webmanifest", "dest": "server.js" },
-    { "src": "/med-arc-icon.svg", "dest": "server.js" },
-    { "src": "/service-worker.js", "dest": "server.js" },
-    { "src": "/", "dest": "server.js" }
+  "rewrites": [
+    { "source": "/health", "destination": "/api/server" },
+    { "source": "/api/:path*", "destination": "/api/server" },
+    { "source": "/(.*)", "destination": "/api/server" }
   ]
 }
