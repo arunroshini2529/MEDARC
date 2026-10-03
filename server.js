@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import pg from 'pg';
 import path from 'node:path';
@@ -9,7 +10,8 @@ const port = Number(process.env.PORT || 3000);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: true } : undefined,
+  // Neon requires SSL — always enable for cloud connections
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: true } : undefined,
   max: 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000
@@ -123,12 +125,27 @@ async function start() {
   app.listen(port, '0.0.0.0', () => console.log(`MED ARC is listening on port ${port}`));
 }
 
-start().catch(error => {
-  console.error('Could not start MED ARC. Check DATABASE_URL and database availability.', error.message);
-  process.exit(1);
-});
+// Only auto-start when run directly (not on Vercel serverless)
+if (process.env.VERCEL !== '1') {
+  start().catch(error => {
+    console.error('Could not start MED ARC. Check DATABASE_URL and database availability.', error.message);
+    process.exit(1);
+  });
+} else {
+  // Vercel cold start: ensure schema exists (non-fatal if table already exists)
+  pool.query(`
+    CREATE TABLE IF NOT EXISTS planner_state (
+      token UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      state JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `).catch(() => {});
+}
 
 process.on('SIGTERM', async () => {
   await pool.end();
   process.exit(0);
 });
+
+// Export for Vercel serverless
+export default app;
