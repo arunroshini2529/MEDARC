@@ -1,0 +1,7 @@
+{
+  "task_id": "task-med-arc-fixes",
+  "task_description": "Implement 10 functional fixes to the MED ARC single-file study planner: timer task linkage + richer session recording, orphaned session cleanup, longest streak, analytics page, weekly goal + progress bar, per-subject progress, keyword search, CSV export, remove miniWeek slice cap, restore mobile task menu.",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null
+}

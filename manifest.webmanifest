@@ -1,0 +1,14 @@
+{
+  "id": "/",
+  "name": "MED ARC Study Planner",
+  "short_name": "MED ARC",
+  "description": "A calm, encouraging study planner and focus timer.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f8fc",
+  "theme_color": "#5078e8",
+  "icons": [
+    { "src": "med-arc-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

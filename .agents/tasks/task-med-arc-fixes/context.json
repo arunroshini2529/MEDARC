@@ -1,0 +1,17 @@
+{
+  "project_type": "Single-file SPA, no build step — all HTML + CSS + JS in one index.html",
+  "language": "Vanilla JavaScript (ES2020 IIFE), HTML5, CSS",
+  "build_system": "None. The app is a single index.html served by server.js (Express). No bundler, no transpiler. Edit index.html directly.",
+  "test_framework": "None. No automated tests exist. Verify by opening the file in a browser (or running `node server.js` and visiting http://localhost:3000) and manually exercising each feature.",
+  "build_command": "N/A — no build step. To start the server: `node server.js` (requires .env with DATABASE_URL, or the app falls back to localStorage).",
+  "test_command": "Manual only: open http://localhost:3000 in a browser. All 10 fixes must be visually and interactively verified.",
+  "verification_instructions": "1. Run `node server.js` (or open index.html directly in a browser for localStorage-only mode). 2. Navigate each page and exercise the changed feature. 3. Reload the page and confirm data persists. See each FEAT's 'verification' array for specific checks.",
+  "snapshot_or_generated_files": null,
+  "environment_constraints": "Windows PowerShell workspace. The entire app is in c:\\Users\\Arun\\Desktop\\STUDY PLANNER\\index.html. All edits go to that single file. Never create a separate .js or .css file unless instructed. The minified IIFE starts at the <script> tag near the bottom of the file.",
+  "contribution_requirements": "No AGENTS.md or CONTRIBUTING.md exists. Keep all code in index.html. Maintain the existing minified/compact style for JS (no line breaks inside the IIFE script block). CSS goes in the <style> block. HTML goes in the <body> between the nav and the <script>.",
+  "key_patterns": "- Data model: `data = { subjects[], tasks[], sessions[], checklist[], notes[] }`. Sessions shape currently `{date, taskId}` — backward-compat rule: treat missing duration as 0. - Helper functions: `day()`, `subject(id)`, `esc()`, `fmtDate()`, `minsText()`, `toast()`. - Page switching: `switchPage(name)` toggles `.active` on `.page` elements and `#nav` buttons. - Rendering: `renderDashboard()`, `renderCalendar()`, `renderSubjects()`, `renderTasks()`, `renderNotes()`, `updateStreak()` — all called by `update()`. - Task actions bound by `bindTaskActions(root)`. - Modal: `openModal(id, date, subjectId)` / `closeModal()`. - `save()` writes to localStorage and debounces PUT /api/state. - The `update()` function calls all render functions and `save()`. - CSS custom properties: --ink, --muted, --blue, --blue-dark, --blue-pale, --line, --bg, --white, --green, --shadow. Dark mode via `.dark` class on html+body.",
+  "relevant_files": [
+    "c:\\Users\\Arun\\Desktop\\STUDY PLANNER\\index.html"
+  ],
+  "directory_structure": "STUDY PLANNER/ — index.html (entire app), server.js (Express API), app-server.cjs (unused), service-worker.js (PWA cache), manifest.webmanifest, med-arc-icon.svg, package.json, docker-compose.yml, .env.example, .agents/tasks/ (planning artifacts)"
+}

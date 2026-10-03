@@ -1,0 +1,47 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Data model + session recording fixes: (Fix 1) timer task linkage and richer session objects, (Fix 2) orphaned session cleanup on task delete, (Fix 3) longest streak. These three share the same data-model concern — they all touch sessions[] shape and the streak card — so they form one coherent unit.",
+  "status": "completed",
+  "steps": [
+    "Step 1 — CSS additions (streak best-streak line, timer task selector styling). In the <style> block, before the @media(max-width:1050px) rule, add: `.streak-best{font-size:10px;color:#b89a5a;margin-top:4px;font-weight:600}` and `.dark .streak-best{color:#d4b97a}` and `#timerTask{display:block;margin:14px auto 0;border:1px solid var(--line);border-radius:9px;padding:9px 12px;color:var(--ink);background:white;min-width:220px;max-width:340px}` and `.dark #timerTask{background:#202838;color:var(--ink);border-color:#3a455b}`.",
+
+    "Step 2 — HTML: add timerTask select. In page-focus, inside `<article class='card timer-wrap'>`, immediately after `<p id='timerHint'>...</p>` and before `<div class='timer-modes'>`, insert: `<select id='timerTask'><option value=''>— No task selected —</option></select>`.",
+
+    "Step 3 — HTML: add best-streak line in streak card. In the sidebar `.streak-card`, after `<p id='streakText'>...</p>`, add `<p class='streak-best' id='streakBest' style='display:none'></p>`.",
+
+    "Step 4 — JS: update session push in bindTaskActions checkbox handler. Find the line `data.sessions.push({date:day(),taskId:t.id})` and replace it with `data.sessions.push({date:day(),taskId:t.id,duration:Number(t.duration)||0,startedAt:new Date().toISOString(),endedAt:new Date().toISOString()})`.",
+
+    "Step 5 — JS: update timer completion session push. Find the line `data.sessions.push({date:day(),taskId:null})` inside the timerToggle setInterval callback (the `if(remaining<=0)` block) and replace it with: `const _tid=$('#timerTask').value||null,_dur=mode==='focus'?25:5,_end=new Date().toISOString(),_start=new Date(Date.now()-_dur*60000).toISOString();data.sessions.push({date:day(),taskId:_tid,duration:_dur,startedAt:_start,endedAt:_end});`.",
+
+    "Step 6 — JS: populate timerTask select. Add a new function `renderTimerTask()` that sets `$('#timerTask').innerHTML='<option value=\"\">— No task selected —</option>'+data.tasks.filter(t=>!t.done).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time)).map(t=>`<option value=\"${esc(t.id)}\">${esc(t.topic)} (${fmtDate(t.date,{month:'short',day:'numeric'})})</option>`).join('')`. Call `renderTimerTask()` at the end of `renderTasks()` and at the end of `renderDashboard()`.",
+
+    "Step 7 — JS: update renderDashboard studyTime to sum session durations. In `renderDashboard`, replace `$('#studyTime').innerHTML=\\`${completed} <small>min</small>\\`` (where `completed` is built from tasks.filter(t=>t.done).reduce duration) with a line that ALSO sums timer sessions: `const timerMins=data.sessions.filter(s=>s.date===today&&s.taskId===null||s.duration>0&&s.date===today).reduce((n,s)=>n+(Number(s.duration)||0),0);` — wait, this would double-count. Instead replace the `$('#studyTime')` line only: `const sessionMins=data.sessions.filter(s=>s.date===today).reduce((n,s)=>n+(Number(s.duration)||0),0);$('#studyTime').innerHTML=\\`${sessionMins} <small>min</small>\\``. The variable `completed` is still computed above for the progress ring; leave it as-is. Just swap the studyTime display to use `sessionMins` instead of `completed`.",
+
+    "Step 8 — JS: orphaned session cleanup in bindTaskActions delete handler. Find `root.querySelectorAll('[data-delete]').forEach(b=>b.onclick=()=>{data.tasks=data.tasks.filter(x=>x.id!==b.dataset.delete);update();toast('Session removed.')})` and replace with `root.querySelectorAll('[data-delete]').forEach(b=>b.onclick=()=>{const _did=b.dataset.delete;data.tasks=data.tasks.filter(x=>x.id!==_did);data.sessions=data.sessions.filter(s=>s.taskId!==_did);update();toast('Session removed.')})`.",
+
+    "Step 9 — JS: update updateStreak() to compute and store longestStreak, and display it. Replace the entire `updateStreak` function body with: compute `dates` as sorted unique date strings from sessions[]; compute current streak `n` (existing logic unchanged); then compute longest streak `best` by iterating all dates in order and tracking consecutive-day runs; set `data.longestStreak=Math.max(data.longestStreak||0,n,best)`; call `save()` only if longestStreak changed; update `$('#streakTitle')` and `$('#streakText')` as before; show `$('#streakBest')` only when `data.longestStreak>0` and set its textContent to `'🏆 Best: '+data.longestStreak+' '+(data.longestStreak===1?'day':'days')`.",
+
+    "Step 10 — JS: init guard for data.longestStreak. In the `try{data={...initial,...JSON.parse(...)}}` block, after the `if(!Array.isArray(data.notes))` line, add `if(typeof data.longestStreak!=='number')data.longestStreak=0;`. Also add `longestStreak:0` to the `initial` object (after the `notes:[]` entry)."
+  ],
+  "acceptance_criteria": [
+    "Focus Timer page shows a 'No task selected' dropdown populated with incomplete tasks.",
+    "Completing a timer session (let a 1-second debug timer run) records a session with duration=25 and a valid startedAt/endedAt ISO string.",
+    "Completing a timer session with a task selected records that task's id in session.taskId.",
+    "Checking off a task creates a session with duration = that task's duration and startedAt/endedAt set.",
+    "Deleting a task also removes all sessions whose taskId matches.",
+    "Dashboard 'Study time today' reflects the sum of session durations (not just task check-offs).",
+    "Streak card shows 'Best: N days' line when longestStreak > 0.",
+    "Longest streak is computed correctly from full session history and persists across reloads."
+  ],
+  "verification": [
+    "Open index.html in browser. Go to Focus Timer. Confirm dropdown exists and lists incomplete tasks.",
+    "Select a task, start the timer, wait for completion (temporarily set remaining=3 to speed test). Confirm a session appears in localStorage with duration, startedAt, endedAt, and the correct taskId.",
+    "Go to Tasks. Check off a task. Confirm the session in localStorage has duration > 0.",
+    "Delete a task. Confirm sessions with that taskId are gone from localStorage data.sessions.",
+    "Go to Dashboard. Confirm 'Study time today' shows the summed minutes from sessions, not just completed tasks.",
+    "Confirm streak card shows '🏆 Best: N days' after at least one session exists."
+  ],
+  "blocked_reason": null,
+  "findings": "All 10 steps implemented. Key notes for later FEATs: (1) renderTimerTask() is now a standalone function called from both renderDashboard() and renderTasks() — any new page that needs the timer task list populated should also call it. (2) data.longestStreak is now persisted in the data model; FEATs that touch save/load must include it in guards. (3) The session shape is now {date, taskId, duration, startedAt, endedAt} — all new session producers should use this shape. (4) The syncWithServer initialisation block now guards longestStreak too. (5) studyTime card shows sessionMins (sum of all session durations today) instead of just completed-task durations — this is the new contract for the stat card."
+}

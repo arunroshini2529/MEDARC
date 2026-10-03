@@ -1,0 +1,25 @@
+VERIFICATION REPORT: server.js Syntax Check
+=============================================
+
+SYNTAX CHECK: PASSED ✓
+Exit Code: 0
+
+CHANGES MADE:
+1. Updated CREATE TABLE statement (start() function)
+   - Replaced: id SMALLINT PRIMARY KEY CHECK (id = 1)
+   - With: token UUID PRIMARY KEY DEFAULT gen_random_uuid()
+
+2. Updated GET /api/state route
+   - Now reads Authorization header: "Bearer <token>"
+   - Validates token against UUID regex format
+   - If valid token: queries SELECT state FROM planner_state WHERE token = $1
+   - If invalid/missing token: generates new UUID, inserts empty row, returns X-Auth-Token header
+   - Returns { state, token } in both cases
+
+3. Updated PUT /api/state route
+   - Now requires Authorization header with valid UUID token
+   - Returns 401 with error message if token missing or invalid
+   - UPSERT: INSERT ... ON CONFLICT (token) DO UPDATE
+   - Returns { success: true, token } instead of { saved: true, updatedAt }
+
+All changes implemented as specified. Ready for deployment.
