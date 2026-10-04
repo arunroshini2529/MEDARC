@@ -6,6 +6,14 @@
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/server" }
+    { "source": "/auth/:path*", "destination": "/api/server" },
+    { "source": "/api/:path*", "destination": "/api/server" },
+    { "source": "/health", "destination": "/api/server" },
+    { "source": "/login", "destination": "/api/server" },
+    { "source": "/", "destination": "/api/server" },
+    { "source": "/index.html", "destination": "/api/server" },
+    { "source": "/manifest.webmanifest", "destination": "/api/server" },
+    { "source": "/med-arc-icon.svg", "destination": "/api/server" },
+    { "source": "/service-worker.js", "destination": "/api/server" }
   ]
 }

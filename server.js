@@ -40,6 +40,11 @@ pool.query(`
 // ── Middleware ──────────────────────────────────────────────────────────
 app.disable('x-powered-by');
 app.use((req, res, next) => {
+  // Vercel rewrites strip the original path — restore it from x-vercel-forwarded-for or x-matched-path
+  const originalPath = req.headers['x-matched-path'] || req.headers['x-vercel-rewrite-dest'];
+  if (originalPath && originalPath !== req.path) {
+    req.url = originalPath + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+  }
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
@@ -93,6 +98,20 @@ app.get('/health', async (_req, res) => {
   } catch {
     res.status(503).json({ status: 'unavailable', database: 'disconnected' });
   }
+});
+
+// ── Debug: show what path/headers Vercel passes ──────────────────────────
+app.get('/debug', (req, res) => {
+  res.json({
+    path: req.path,
+    url: req.url,
+    originalUrl: req.originalUrl,
+    headers: {
+      'x-matched-path': req.headers['x-matched-path'],
+      'x-vercel-id': req.headers['x-vercel-id'],
+      'x-forwarded-host': req.headers['x-forwarded-host'],
+    }
+  });
 });
 
 // ── Auth: current user ──────────────────────────────────────────────────
