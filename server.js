@@ -14,28 +14,40 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: true } : undefined,
-  max: 10,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 10_000
+  max: 3,
+  idleTimeoutMillis: 10_000,
+  connectionTimeoutMillis: 30_000  // longer timeout for Neon cold starts
 });
 
 // Schema: provider + provider_id = unique identity, separate data per provider
-pool.query(`
-  CREATE TABLE IF NOT EXISTS users (
-    id          BIGSERIAL PRIMARY KEY,
-    provider    TEXT NOT NULL,
-    provider_id TEXT NOT NULL,
-    username    TEXT NOT NULL,
-    avatar_url  TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (provider, provider_id)
-  );
-  CREATE TABLE IF NOT EXISTS planner_state (
-    user_id    BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    state      JSONB NOT NULL DEFAULT '{}',
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
-`).catch(err => console.error('Schema init error:', err.message));
+async function initSchema() {
+  for (let i = 0; i < 3; i++) {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id          BIGSERIAL PRIMARY KEY,
+          provider    TEXT NOT NULL,
+          provider_id TEXT NOT NULL,
+          username    TEXT NOT NULL,
+          avatar_url  TEXT,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (provider, provider_id)
+        );
+        CREATE TABLE IF NOT EXISTS planner_state (
+          user_id    BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          state      JSONB NOT NULL DEFAULT '{}',
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      console.log('Schema ready');
+      return;
+    } catch (err) {
+      console.error(`Schema init attempt ${i+1} failed:`, err.message);
+      if (i < 2) await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+}
+initSchema();
 
 // ── Middleware ──────────────────────────────────────────────────────────
 app.disable('x-powered-by');
@@ -75,19 +87,28 @@ function requireAuth(req, res, next) {
 }
 
 async function upsertUser(provider, providerId, username, avatarUrl) {
-  const { rows } = await pool.query(`
-    INSERT INTO users (provider, provider_id, username, avatar_url)
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT (provider, provider_id) DO UPDATE
-      SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url
-    RETURNING id
-  `, [provider, providerId, username, avatarUrl]);
-  const userId = rows[0].id;
-  await pool.query(`
-    INSERT INTO planner_state (user_id, state)
-    VALUES ($1, '{}') ON CONFLICT DO NOTHING
-  `, [userId]);
-  return userId;
+  // Retry up to 3 times for Neon cold starts
+  for (let i = 0; i < 3; i++) {
+    try {
+      const { rows } = await pool.query(`
+        INSERT INTO users (provider, provider_id, username, avatar_url)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (provider, provider_id) DO UPDATE
+          SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url
+        RETURNING id
+      `, [provider, providerId, username, avatarUrl]);
+      const userId = rows[0].id;
+      await pool.query(`
+        INSERT INTO planner_state (user_id, state)
+        VALUES ($1, '{}') ON CONFLICT DO NOTHING
+      `, [userId]);
+      return userId;
+    } catch (err) {
+      console.error(`upsertUser attempt ${i+1} failed:`, err.message);
+      if (i < 2) await new Promise(r => setTimeout(r, 1500));
+      else throw err;
+    }
+  }
 }
 
 // ── Health ──────────────────────────────────────────────────────────────
@@ -277,15 +298,25 @@ app.put('/api/state', requireAuth, async (req, res, next) => {
 const staticFiles = {
   '/manifest.webmanifest': { file: 'manifest.webmanifest', type: 'application/manifest+json; charset=utf-8' },
   '/med-arc-icon.svg':     { file: 'med-arc-icon.svg',     type: 'image/svg+xml' },
-  '/service-worker.js':    { file: 'service-worker.js',    type: 'application/javascript', noCache: true },
-};for (const [route, { file, type, noCache }] of Object.entries(staticFiles)) {
+};
+for (const [route, { file, type }] of Object.entries(staticFiles)) {
   app.get(route, (_req, res) => {
-    if (noCache) res.setHeader('Cache-Control', 'no-cache');
-    else if (process.env.NODE_ENV === 'production') res.setHeader('Cache-Control', 'public, max-age=3600');
+    if (process.env.NODE_ENV === 'production') res.setHeader('Cache-Control', 'public, max-age=3600');
     res.setHeader('Content-Type', type);
-    res.sendFile(path.join(here, file));
+    res.sendFile(path.join(here, file), err => {
+      if (err) res.status(404).json({ error: 'Not found' });
+    });
   });
 }
+
+// Service worker — graceful fallback if file missing on Vercel
+app.get('/service-worker.js', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Content-Type', 'application/javascript');
+  res.sendFile(path.join(here, 'service-worker.js'), err => {
+    if (err) res.status(200).send('// service worker not available');
+  });
+});
 
 app.get(['/', '/index.html'], (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
