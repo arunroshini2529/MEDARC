@@ -127,6 +127,10 @@ app.get('/debug', (req, res) => {
     path: req.path,
     url: req.url,
     originalUrl: req.originalUrl,
+    APP_URL,
+    GITHUB_CLIENT_ID_SET: !!GITHUB_CLIENT_ID,
+    GOOGLE_CLIENT_ID_SET: !!GOOGLE_CLIENT_ID,
+    NODE_ENV: process.env.NODE_ENV,
     headers: {
       'x-matched-path': req.headers['x-matched-path'],
       'x-vercel-id': req.headers['x-vercel-id'],
