@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
-import cookieSession from 'cookie-session';
 import pg from 'pg';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 
 const { Pool } = pg;
 const app = express();
@@ -16,10 +16,10 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: true } : undefined,
   max: 3,
   idleTimeoutMillis: 10_000,
-  connectionTimeoutMillis: 30_000  // longer timeout for Neon cold starts
+  connectionTimeoutMillis: 30_000
 });
 
-// Schema: provider + provider_id = unique identity, separate data per provider
+// ── Schema ──────────────────────────────────────────────────────────────
 async function initSchema() {
   for (let i = 0; i < 3; i++) {
     try {
@@ -33,6 +33,15 @@ async function initSchema() {
           created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE (provider, provider_id)
         );
+        CREATE TABLE IF NOT EXISTS sessions (
+          id         TEXT PRIMARY KEY,
+          user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          username   TEXT NOT NULL,
+          avatar_url TEXT,
+          provider   TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 days'),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
         CREATE TABLE IF NOT EXISTS planner_state (
           user_id    BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
           state      JSONB NOT NULL DEFAULT '{}',
@@ -42,7 +51,7 @@ async function initSchema() {
       console.log('Schema ready');
       return;
     } catch (err) {
-      console.error(`Schema init attempt ${i+1} failed:`, err.message);
+      console.error(`Schema init attempt ${i+1}:`, err.message);
       if (i < 2) await new Promise(r => setTimeout(r, 2000));
     }
   }
@@ -52,24 +61,67 @@ initSchema();
 // ── Middleware ──────────────────────────────────────────────────────────
 app.disable('x-powered-by');
 app.use((req, res, next) => {
-  // Vercel rewrites strip the original path — restore it from x-vercel-forwarded-for or x-matched-path
-  const originalPath = req.headers['x-matched-path'] || req.headers['x-vercel-rewrite-dest'];
-  if (originalPath && originalPath !== req.path) {
-    req.url = originalPath + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
-  }
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
 });
 app.use(express.json({ limit: '1mb', strict: true }));
-app.use(cookieSession({
-  name: 'medarc_session',
-  secret: process.env.SESSION_SECRET || 'dev-secret-change-in-production',
-  maxAge: 30 * 24 * 60 * 60 * 1000,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'lax',
-  httpOnly: true
-}));
+
+// ── Session helpers (DB-backed) ─────────────────────────────────────────
+const COOKIE_NAME = 'medarc_sid';
+const COOKIE_MAX_AGE = 30 * 24 * 60 * 60; // 30 days in seconds
+
+async function createSession(userId, username, avatarUrl, provider) {
+  const sid = randomBytes(32).toString('hex');
+  await pool.query(
+    `INSERT INTO sessions (id, user_id, username, avatar_url, provider)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [sid, userId, username, avatarUrl, provider]
+  );
+  return sid;
+}
+
+async function getSession(sid) {
+  if (!sid) return null;
+  const { rows } = await pool.query(
+    `SELECT user_id, username, avatar_url, provider
+     FROM sessions WHERE id = $1 AND expires_at > NOW()`,
+    [sid]
+  );
+  return rows[0] || null;
+}
+
+async function deleteSession(sid) {
+  if (sid) await pool.query('DELETE FROM sessions WHERE id = $1', [sid]);
+}
+
+function getSid(req) {
+  const cookie = req.headers.cookie || '';
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
+  return match ? match[1] : null;
+}
+
+function setCookie(res, sid) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.setHeader('Set-Cookie',
+    `${COOKIE_NAME}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${isProduction ? '; Secure' : ''}`
+  );
+}
+
+function clearCookie(res) {
+  res.setHeader('Set-Cookie',
+    `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`
+  );
+}
+
+// ── Auth middleware ─────────────────────────────────────────────────────
+async function requireAuth(req, res, next) {
+  const sid = getSid(req);
+  const session = await getSession(sid).catch(() => null);
+  if (!session) return res.status(401).json({ error: 'Not authenticated', loginUrl: '/login' });
+  req.sessionData = session;
+  next();
+}
 
 // ── Config ──────────────────────────────────────────────────────────────
 const APP_URL              = process.env.APP_URL || `http://localhost:${port}`;
@@ -78,37 +130,21 @@ const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 
-// ── Auth helpers ────────────────────────────────────────────────────────
-function requireAuth(req, res, next) {
-  if (!req.session?.userId) {
-    return res.status(401).json({ error: 'Not authenticated', loginUrl: '/' });
-  }
-  next();
-}
-
+// ── DB user helper ──────────────────────────────────────────────────────
 async function upsertUser(provider, providerId, username, avatarUrl) {
-  // Retry up to 3 times for Neon cold starts
-  for (let i = 0; i < 3; i++) {
-    try {
-      const { rows } = await pool.query(`
-        INSERT INTO users (provider, provider_id, username, avatar_url)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (provider, provider_id) DO UPDATE
-          SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url
-        RETURNING id
-      `, [provider, providerId, username, avatarUrl]);
-      const userId = rows[0].id;
-      await pool.query(`
-        INSERT INTO planner_state (user_id, state)
-        VALUES ($1, '{}') ON CONFLICT DO NOTHING
-      `, [userId]);
-      return userId;
-    } catch (err) {
-      console.error(`upsertUser attempt ${i+1} failed:`, err.message);
-      if (i < 2) await new Promise(r => setTimeout(r, 1500));
-      else throw err;
-    }
-  }
+  const { rows } = await pool.query(`
+    INSERT INTO users (provider, provider_id, username, avatar_url)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (provider, provider_id) DO UPDATE
+      SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url
+    RETURNING id
+  `, [provider, providerId, username, avatarUrl]);
+  const userId = rows[0].id;
+  await pool.query(
+    `INSERT INTO planner_state (user_id, state) VALUES ($1, '{}') ON CONFLICT DO NOTHING`,
+    [userId]
+  );
+  return userId;
 }
 
 // ── Health ──────────────────────────────────────────────────────────────
@@ -121,38 +157,40 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-// ── Debug: show what path/headers Vercel passes ──────────────────────────
-app.get('/debug', (req, res) => {
+// ── Debug ───────────────────────────────────────────────────────────────
+app.get('/debug', async (req, res) => {
+  const sid = getSid(req);
+  const session = await getSession(sid).catch(() => null);
   res.json({
     path: req.path,
-    url: req.url,
-    originalUrl: req.originalUrl,
     APP_URL,
     GITHUB_CLIENT_ID_SET: !!GITHUB_CLIENT_ID,
     GOOGLE_CLIENT_ID_SET: !!GOOGLE_CLIENT_ID,
     NODE_ENV: process.env.NODE_ENV,
-    headers: {
-      'x-matched-path': req.headers['x-matched-path'],
-      'x-vercel-id': req.headers['x-vercel-id'],
-      'x-forwarded-host': req.headers['x-forwarded-host'],
-    }
+    sid_present: !!sid,
+    session_valid: !!session,
+    session_user: session?.username || null
   });
 });
 
 // ── Auth: current user ──────────────────────────────────────────────────
-app.get('/auth/me', (req, res) => {
-  if (!req.session?.userId) return res.json({ user: null });
+app.get('/auth/me', async (req, res) => {
+  const sid = getSid(req);
+  const session = await getSession(sid).catch(() => null);
+  if (!session) return res.json({ user: null });
   res.json({ user: {
-    id:        req.session.userId,
-    username:  req.session.username,
-    avatarUrl: req.session.avatarUrl,
-    provider:  req.session.provider
+    id:        session.user_id,
+    username:  session.username,
+    avatarUrl: session.avatar_url,
+    provider:  session.provider
   }});
 });
 
 // ── Auth: logout ────────────────────────────────────────────────────────
-app.post('/auth/logout', (req, res) => {
-  req.session = null;
+app.post('/auth/logout', async (req, res) => {
+  const sid = getSid(req);
+  await deleteSession(sid).catch(() => {});
+  clearCookie(res);
   res.json({ success: true });
 });
 
@@ -172,9 +210,10 @@ app.get('/auth/github', (req, res) => {
 
 app.get('/auth/github/callback', async (req, res) => {
   const { code, error } = req.query;
-  console.log('GitHub callback: code present=', !!code, 'error=', error, 'APP_URL=', APP_URL);
+  console.log('GitHub callback: code=', !!code, 'error=', error);
   if (error || !code) return res.redirect('/login?auth=error');
   try {
+    // Exchange code for token
     const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -186,9 +225,10 @@ app.get('/auth/github/callback', async (req, res) => {
       })
     });
     const tokenData = await tokenRes.json();
-    console.log('GitHub token result:', tokenData.error || (tokenData.access_token ? 'OK' : 'no token'));
+    console.log('GitHub token:', tokenData.error || (tokenData.access_token ? 'OK' : 'missing'));
     if (!tokenData.access_token) return res.redirect('/login?auth=error');
 
+    // Get user profile
     const userRes = await fetch('https://api.github.com/user', {
       headers: {
         'Authorization': `Bearer ${tokenData.access_token}`,
@@ -197,13 +237,14 @@ app.get('/auth/github/callback', async (req, res) => {
       }
     });
     const ghUser = await userRes.json();
+    console.log('GitHub user:', ghUser.login || 'missing');
     if (!ghUser.id) return res.redirect('/login?auth=error');
 
+    // Save to DB and create session
     const userId = await upsertUser('github', String(ghUser.id), ghUser.login, ghUser.avatar_url);
-    req.session.userId    = userId;
-    req.session.username  = ghUser.login;
-    req.session.avatarUrl = ghUser.avatar_url;
-    req.session.provider  = 'github';
+    const sid = await createSession(userId, ghUser.login, ghUser.avatar_url, 'github');
+    setCookie(res, sid);
+    console.log('GitHub session created, redirecting to /');
     res.redirect('/?auth=success');
   } catch (err) {
     console.error('GitHub OAuth error:', err.message);
@@ -228,6 +269,7 @@ app.get('/auth/google', (req, res) => {
 
 app.get('/auth/google/callback', async (req, res) => {
   const { code, error } = req.query;
+  console.log('Google callback: code=', !!code, 'error=', error);
   if (error || !code) return res.redirect('/login?auth=error');
   try {
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -242,22 +284,20 @@ app.get('/auth/google/callback', async (req, res) => {
       })
     });
     const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) {
-      console.error('Google token error:', tokenData);
-      return res.redirect('/login?auth=error');
-    }
+    console.log('Google token:', tokenData.error || (tokenData.access_token ? 'OK' : 'missing'));
+    if (!tokenData.access_token) return res.redirect('/login?auth=error');
 
     const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
     });
     const gUser = await userRes.json();
+    console.log('Google user:', gUser.name || 'missing');
     if (!gUser.id) return res.redirect('/login?auth=error');
 
     const userId = await upsertUser('google', gUser.id, gUser.name || gUser.email, gUser.picture);
-    req.session.userId    = userId;
-    req.session.username  = gUser.name || gUser.email;
-    req.session.avatarUrl = gUser.picture;
-    req.session.provider  = 'google';
+    const sid = await createSession(userId, gUser.name || gUser.email, gUser.picture, 'google');
+    setCookie(res, sid);
+    console.log('Google session created, redirecting to /');
     res.redirect('/?auth=success');
   } catch (err) {
     console.error('Google OAuth error:', err.message);
@@ -271,7 +311,7 @@ app.get('/api/state', requireAuth, async (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     const { rows } = await pool.query(
       'SELECT state FROM planner_state WHERE user_id = $1',
-      [req.session.userId]
+      [req.sessionData.user_id]
     );
     res.json({ state: rows[0]?.state ?? {} });
   } catch (err) { next(err); }
@@ -292,7 +332,7 @@ app.put('/api/state', requireAuth, async (req, res, next) => {
       INSERT INTO planner_state (user_id, state, updated_at)
       VALUES ($1, $2::jsonb, NOW())
       ON CONFLICT (user_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
-    `, [req.session.userId, JSON.stringify(state)]);
+    `, [req.sessionData.user_id, JSON.stringify(state)]);
     res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -313,7 +353,6 @@ for (const [route, { file, type }] of Object.entries(staticFiles)) {
   });
 }
 
-// Service worker — graceful fallback if file missing on Vercel
 app.get('/service-worker.js', (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Content-Type', 'application/javascript');
