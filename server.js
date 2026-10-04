@@ -147,6 +147,7 @@ app.get('/auth/github', (req, res) => {
 
 app.get('/auth/github/callback', async (req, res) => {
   const { code, error } = req.query;
+  console.log('GitHub callback hit, code:', code ? 'present' : 'missing', 'error:', error);
   if (error || !code) return res.redirect('/login?auth=error');
   try {
     const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
@@ -160,6 +161,7 @@ app.get('/auth/github/callback', async (req, res) => {
       })
     });
     const tokenData = await tokenRes.json();
+    console.log('GitHub token response:', JSON.stringify({ error: tokenData.error, error_description: tokenData.error_description, has_token: !!tokenData.access_token }));
     if (!tokenData.access_token) return res.redirect('/login?auth=error');
 
     const userRes = await fetch('https://api.github.com/user', {
