@@ -19,18 +19,21 @@ const pool = new Pool({
   connectionTimeoutMillis: 10_000
 });
 
-// Ensure schema on every cold start
+// Schema: provider + provider_id = unique identity, separate data per provider
 pool.query(`
   CREATE TABLE IF NOT EXISTS users (
-    github_id    BIGINT PRIMARY KEY,
-    username     TEXT NOT NULL,
-    avatar_url   TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id          BIGSERIAL PRIMARY KEY,
+    provider    TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    username    TEXT NOT NULL,
+    avatar_url  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (provider, provider_id)
   );
   CREATE TABLE IF NOT EXISTS planner_state (
-    github_id    BIGINT PRIMARY KEY REFERENCES users(github_id) ON DELETE CASCADE,
-    state        JSONB NOT NULL DEFAULT '{}',
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    user_id    BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    state      JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
 `).catch(err => console.error('Schema init error:', err.message));
 
@@ -45,23 +48,41 @@ app.use(express.json({ limit: '1mb', strict: true }));
 app.use(cookieSession({
   name: 'medarc_session',
   secret: process.env.SESSION_SECRET || 'dev-secret-change-in-production',
-  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+  maxAge: 30 * 24 * 60 * 60 * 1000,
   secure: process.env.NODE_ENV === 'production',
   sameSite: 'lax',
   httpOnly: true
 }));
 
-// ── GitHub OAuth config ─────────────────────────────────────────────────
+// ── Config ──────────────────────────────────────────────────────────────
+const APP_URL              = process.env.APP_URL || `http://localhost:${port}`;
 const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
-const APP_URL = process.env.APP_URL || `http://localhost:${port}`;
+const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 
-// ── Auth middleware ─────────────────────────────────────────────────────
+// ── Auth helpers ────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
-  if (!req.session?.githubId) {
-    return res.status(401).json({ error: 'Not authenticated', loginUrl: '/auth/login' });
+  if (!req.session?.userId) {
+    return res.status(401).json({ error: 'Not authenticated', loginUrl: '/' });
   }
   next();
+}
+
+async function upsertUser(provider, providerId, username, avatarUrl) {
+  const { rows } = await pool.query(`
+    INSERT INTO users (provider, provider_id, username, avatar_url)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (provider, provider_id) DO UPDATE
+      SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url
+    RETURNING id
+  `, [provider, providerId, username, avatarUrl]);
+  const userId = rows[0].id;
+  await pool.query(`
+    INSERT INTO planner_state (user_id, state)
+    VALUES ($1, '{}') ON CONFLICT DO NOTHING
+  `, [userId]);
+  return userId;
 }
 
 // ── Health ──────────────────────────────────────────────────────────────
@@ -74,83 +95,15 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-// ── Auth: start GitHub OAuth flow ───────────────────────────────────────
-app.get('/auth/login', (req, res) => {
-  if (!GITHUB_CLIENT_ID) {
-    return res.status(500).json({ error: 'GITHUB_CLIENT_ID not configured' });
-  }
-  const params = new URLSearchParams({
-    client_id: GITHUB_CLIENT_ID,
-    redirect_uri: `${APP_URL}/auth/callback`,
-    scope: 'read:user',
-    allow_signup: 'true'
-  });
-  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
-});
-
-// ── Auth: GitHub OAuth callback ─────────────────────────────────────────
-app.get('/auth/callback', async (req, res) => {
-  const { code, error } = req.query;
-  if (error || !code) {
-    return res.redirect('/?auth=error');
-  }
-  try {
-    // Exchange code for access token
-    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code,
-        redirect_uri: `${APP_URL}/auth/callback`
-      })
-    });
-    const tokenData = await tokenRes.json();
-    if (tokenData.error || !tokenData.access_token) {
-      console.error('Token exchange failed:', tokenData);
-      return res.redirect('/?auth=error');
-    }
-
-    // Get GitHub user profile
-    const userRes = await fetch('https://api.github.com/user', {
-      headers: {
-        'Authorization': `Bearer ${tokenData.access_token}`,
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'MED-ARC-App'
-      }
-    });
-    const ghUser = await userRes.json();
-    if (!ghUser.id) {
-      return res.redirect('/?auth=error');
-    }
-
-    // Upsert user in database
-    await pool.query(`
-      INSERT INTO users (github_id, username, avatar_url)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (github_id) DO UPDATE
-        SET username = EXCLUDED.username,
-            avatar_url = EXCLUDED.avatar_url
-    `, [ghUser.id, ghUser.login, ghUser.avatar_url]);
-
-    // Ensure planner_state row exists for this user
-    await pool.query(`
-      INSERT INTO planner_state (github_id, state)
-      VALUES ($1, '{}')
-      ON CONFLICT DO NOTHING
-    `, [ghUser.id]);
-
-    // Set session
-    req.session.githubId  = ghUser.id;
-    req.session.username  = ghUser.login;
-    req.session.avatarUrl = ghUser.avatar_url;
-
-    res.redirect('/?auth=success');
-  } catch (err) {
-    console.error('OAuth callback error:', err.message);
-    res.redirect('/?auth=error');
-  }
+// ── Auth: current user ──────────────────────────────────────────────────
+app.get('/auth/me', (req, res) => {
+  if (!req.session?.userId) return res.json({ user: null });
+  res.json({ user: {
+    id:        req.session.userId,
+    username:  req.session.username,
+    avatarUrl: req.session.avatarUrl,
+    provider:  req.session.provider
+  }});
 });
 
 // ── Auth: logout ────────────────────────────────────────────────────────
@@ -159,18 +112,111 @@ app.post('/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// ── Auth: current user ──────────────────────────────────────────────────
-app.get('/auth/me', (req, res) => {
-  if (!req.session?.githubId) {
-    return res.json({ user: null });
-  }
-  res.json({
-    user: {
-      id:        req.session.githubId,
-      username:  req.session.username,
-      avatarUrl: req.session.avatarUrl
-    }
+// ════════════════════════════════════════════════════════════════════════
+// GITHUB OAUTH
+// ════════════════════════════════════════════════════════════════════════
+app.get('/auth/github', (req, res) => {
+  if (!GITHUB_CLIENT_ID) return res.status(500).json({ error: 'GITHUB_CLIENT_ID not configured' });
+  const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: `${APP_URL}/auth/github/callback`,
+    scope: 'read:user',
+    allow_signup: 'true'
   });
+  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+});
+
+app.get('/auth/github/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error || !code) return res.redirect('/?auth=error');
+  try {
+    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: `${APP_URL}/auth/github/callback`
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) return res.redirect('/?auth=error');
+
+    const userRes = await fetch('https://api.github.com/user', {
+      headers: {
+        'Authorization': `Bearer ${tokenData.access_token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'MED-ARC-App'
+      }
+    });
+    const ghUser = await userRes.json();
+    if (!ghUser.id) return res.redirect('/?auth=error');
+
+    const userId = await upsertUser('github', String(ghUser.id), ghUser.login, ghUser.avatar_url);
+    req.session.userId    = userId;
+    req.session.username  = ghUser.login;
+    req.session.avatarUrl = ghUser.avatar_url;
+    req.session.provider  = 'github';
+    res.redirect('/?auth=success');
+  } catch (err) {
+    console.error('GitHub OAuth error:', err.message);
+    res.redirect('/?auth=error');
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// GOOGLE OAUTH
+// ════════════════════════════════════════════════════════════════════════
+app.get('/auth/google', (req, res) => {
+  if (!GOOGLE_CLIENT_ID) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID not configured' });
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: `${APP_URL}/auth/google/callback`,
+    response_type: 'code',
+    scope: 'openid profile',
+    access_type: 'online'
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error || !code) return res.redirect('/?auth=error');
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: `${APP_URL}/auth/google/callback`,
+        grant_type: 'authorization_code'
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      console.error('Google token error:', tokenData);
+      return res.redirect('/?auth=error');
+    }
+
+    const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
+    });
+    const gUser = await userRes.json();
+    if (!gUser.id) return res.redirect('/?auth=error');
+
+    const userId = await upsertUser('google', gUser.id, gUser.name || gUser.email, gUser.picture);
+    req.session.userId    = userId;
+    req.session.username  = gUser.name || gUser.email;
+    req.session.avatarUrl = gUser.picture;
+    req.session.provider  = 'google';
+    res.redirect('/?auth=success');
+  } catch (err) {
+    console.error('Google OAuth error:', err.message);
+    res.redirect('/?auth=error');
+  }
 });
 
 // ── API: GET state ──────────────────────────────────────────────────────
@@ -178,13 +224,11 @@ app.get('/api/state', requireAuth, async (req, res, next) => {
   try {
     res.setHeader('Cache-Control', 'no-store');
     const { rows } = await pool.query(
-      'SELECT state FROM planner_state WHERE github_id = $1',
-      [req.session.githubId]
+      'SELECT state FROM planner_state WHERE user_id = $1',
+      [req.session.userId]
     );
     res.json({ state: rows[0]?.state ?? {} });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 });
 
 // ── API: PUT state ──────────────────────────────────────────────────────
@@ -199,16 +243,13 @@ app.put('/api/state', requireAuth, async (req, res, next) => {
   }
   try {
     await pool.query(`
-      INSERT INTO planner_state (github_id, state, updated_at)
+      INSERT INTO planner_state (user_id, state, updated_at)
       VALUES ($1, $2::jsonb, NOW())
-      ON CONFLICT (github_id) DO UPDATE
-        SET state = EXCLUDED.state, updated_at = NOW()
-    `, [req.session.githubId, JSON.stringify(state)]);
+      ON CONFLICT (user_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+    `, [req.session.userId, JSON.stringify(state)]);
     res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 });
 
 // ── Static files ────────────────────────────────────────────────────────
@@ -233,7 +274,6 @@ app.get(['/', '/index.html'], (_req, res) => {
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
-// ── Error handler ───────────────────────────────────────────────────────
 app.use((error, _req, res, _next) => {
   if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Planner data is too large.' });
   if (error instanceof SyntaxError && 'body' in error) return res.status(400).json({ error: 'Request body must be valid JSON.' });
@@ -241,7 +281,6 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ error: 'The planner could not complete that request.' });
 });
 
-// ── Start locally ───────────────────────────────────────────────────────
 if (!process.env.VERCEL) {
   app.listen(port, '0.0.0.0', () => console.log(`MED ARC listening on http://localhost:${port}`));
 }
