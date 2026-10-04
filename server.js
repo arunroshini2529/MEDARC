@@ -9,6 +9,9 @@ const { Pool } = pg;
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const here = path.dirname(fileURLToPath(import.meta.url));
+// On Vercel, files are in the root of the deployment
+const ROOT = process.env.VERCEL ? process.cwd() : here;
+console.log('ROOT path:', ROOT);
 
 // ── Database ────────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -347,7 +350,7 @@ for (const [route, { file, type }] of Object.entries(staticFiles)) {
   app.get(route, (_req, res) => {
     if (process.env.NODE_ENV === 'production') res.setHeader('Cache-Control', 'public, max-age=3600');
     res.setHeader('Content-Type', type);
-    res.sendFile(path.join(here, file), err => {
+    res.sendFile(path.join(ROOT, file), err => {
       if (err) res.status(404).json({ error: 'Not found' });
     });
   });
@@ -356,19 +359,19 @@ for (const [route, { file, type }] of Object.entries(staticFiles)) {
 app.get('/service-worker.js', (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Content-Type', 'application/javascript');
-  res.sendFile(path.join(here, 'service-worker.js'), err => {
+  res.sendFile(path.join(ROOT, 'service-worker.js'), err => {
     if (err) res.status(200).send('// service worker not available');
   });
 });
 
 app.get(['/', '/index.html'], (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(here, 'index.html'));
+  res.sendFile(path.join(ROOT, 'index.html'));
 });
 
 app.get('/login', (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(here, 'login.html'));
+  res.sendFile(path.join(ROOT, 'login.html'));
 });
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
