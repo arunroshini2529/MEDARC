@@ -128,7 +128,7 @@ app.get('/auth/github', (req, res) => {
 
 app.get('/auth/github/callback', async (req, res) => {
   const { code, error } = req.query;
-  if (error || !code) return res.redirect('/?auth=error');
+  if (error || !code) return res.redirect('/login?auth=error');
   try {
     const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
@@ -141,7 +141,7 @@ app.get('/auth/github/callback', async (req, res) => {
       })
     });
     const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) return res.redirect('/?auth=error');
+    if (!tokenData.access_token) return res.redirect('/login?auth=error');
 
     const userRes = await fetch('https://api.github.com/user', {
       headers: {
@@ -151,7 +151,7 @@ app.get('/auth/github/callback', async (req, res) => {
       }
     });
     const ghUser = await userRes.json();
-    if (!ghUser.id) return res.redirect('/?auth=error');
+    if (!ghUser.id) return res.redirect('/login?auth=error');
 
     const userId = await upsertUser('github', String(ghUser.id), ghUser.login, ghUser.avatar_url);
     req.session.userId    = userId;
@@ -161,7 +161,7 @@ app.get('/auth/github/callback', async (req, res) => {
     res.redirect('/?auth=success');
   } catch (err) {
     console.error('GitHub OAuth error:', err.message);
-    res.redirect('/?auth=error');
+    res.redirect('/login?auth=error');
   }
 });
 
@@ -182,7 +182,7 @@ app.get('/auth/google', (req, res) => {
 
 app.get('/auth/google/callback', async (req, res) => {
   const { code, error } = req.query;
-  if (error || !code) return res.redirect('/?auth=error');
+  if (error || !code) return res.redirect('/login?auth=error');
   try {
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
@@ -198,14 +198,14 @@ app.get('/auth/google/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (!tokenData.access_token) {
       console.error('Google token error:', tokenData);
-      return res.redirect('/?auth=error');
+      return res.redirect('/login?auth=error');
     }
 
     const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
     });
     const gUser = await userRes.json();
-    if (!gUser.id) return res.redirect('/?auth=error');
+    if (!gUser.id) return res.redirect('/login?auth=error');
 
     const userId = await upsertUser('google', gUser.id, gUser.name || gUser.email, gUser.picture);
     req.session.userId    = userId;
@@ -215,7 +215,7 @@ app.get('/auth/google/callback', async (req, res) => {
     res.redirect('/?auth=success');
   } catch (err) {
     console.error('Google OAuth error:', err.message);
-    res.redirect('/?auth=error');
+    res.redirect('/login?auth=error');
   }
 });
 
@@ -257,8 +257,7 @@ const staticFiles = {
   '/manifest.webmanifest': { file: 'manifest.webmanifest', type: 'application/manifest+json; charset=utf-8' },
   '/med-arc-icon.svg':     { file: 'med-arc-icon.svg',     type: 'image/svg+xml' },
   '/service-worker.js':    { file: 'service-worker.js',    type: 'application/javascript', noCache: true },
-};
-for (const [route, { file, type, noCache }] of Object.entries(staticFiles)) {
+};for (const [route, { file, type, noCache }] of Object.entries(staticFiles)) {
   app.get(route, (_req, res) => {
     if (noCache) res.setHeader('Cache-Control', 'no-cache');
     else if (process.env.NODE_ENV === 'production') res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -270,6 +269,11 @@ for (const [route, { file, type, noCache }] of Object.entries(staticFiles)) {
 app.get(['/', '/index.html'], (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(here, 'index.html'));
+});
+
+app.get('/login', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(here, 'login.html'));
 });
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
