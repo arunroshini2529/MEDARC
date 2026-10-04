@@ -1,8 +1,11 @@
 {
   "version": 2,
+  "functions": {
+    "api/server.js": {
+      "maxDuration": 30
+    }
+  },
   "rewrites": [
-    { "source": "/health", "destination": "/api/server" },
-    { "source": "/api/:path*", "destination": "/api/server" },
     { "source": "/(.*)", "destination": "/api/server" }
   ]
 }
