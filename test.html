@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Page</title>
+    <style>
+        body { 
+            background: #f0f0f0; 
+            font-family: Arial; 
+            padding: 20px;
+        }
+        .box { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>MED ARC Test Page</h1>
+        <p>If you can see this styled page, then:</p>
+        <ul>
+            <li>✅ HTML is loading</li>
+            <li>✅ CSS is working</li>
+            <li>✅ Browser is rendering correctly</li>
+        </ul>
+        <button onclick="alert('JavaScript works!')">Test JavaScript</button>
+    </div>
+    <script>
+        console.log('Script loaded successfully');
+        document.querySelector('h1').style.color = 'green';
+    </script>
+</body>
+</html>
